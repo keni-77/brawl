@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>スタイリッシュ・スマブラ風アクション (オフライン/オンライン統合版)</title>
+    <title>2人で乱闘！ 物理Bros. (オフライン/オンライン統合版)</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body {
@@ -67,7 +67,7 @@
     </div>
 
     <div id="screen-game" class="screen">
-        <canvas id="gameCanvas" width="800" height="450"></canvas>
+        <canvas id="gameCanvas" width="950" height="600"></canvas>
         <div class="ui">
             <div class="p1-ui">1P: <span id="p1-percent">0</span>% <span id="p1-stock"></span></div>
             <div class="p2-ui">2P: <span id="p2-percent">0</span>% <span id="p2-stock"></span></div>
@@ -177,7 +177,7 @@
         const canvas = document.getElementById("gameCanvas");
         const ctx = canvas.getContext("2d");
 
-        const stage = { x: 150, y: 350, width: 500, height: 20 };
+        const stage = { x: 250, y: 450, width: 450, height: 20 };
         const gravity = 0.45; const friction = 0.85;
         let isGameOver = false;
         let particles = [];
@@ -503,8 +503,8 @@
 
         function startGame() {
             showScreen('screen-game');
-            p1 = new Player(250, 200, "#ff4a4a", false);
-            p2 = new Player(550, 200, "#4a90ff", true);
+            p1 = new Player(325, 300, "#ff4a4a", false);
+            p2 = new Player(600, 300, "#4a90ff", true);
             isGameOver = false; particles = [];
             requestAnimationFrame(gameLoop);
         }
