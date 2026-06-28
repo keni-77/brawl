@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>スタイリッシュ・スマブラ風アクション (オフライン/オンライン統合版)</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body {
+            margin: 0; background-color: #111; color: white;
+            font-family: sans-serif; overflow: hidden; user-select: none;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh;
+        }
+        .screen { display: none; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; }
+        .screen.active { display: flex; }
+        
+        h1 { font-size: 40px; text-shadow: 0 0 15px #00ffff; margin-bottom: 40px; text-align: center; }
+        h2 { color: #ccc; }
+        
+        .btn {
+            background: #222; border: 2px solid #00ffff; color: #fff;
+            padding: 15px 40px; font-size: 20px; font-weight: bold; cursor: pointer;
+            margin: 10px; border-radius: 8px; transition: 0.2s; min-width: 300px;
+        }
+        .btn:hover { background: #00ffff; color: #000; box-shadow: 0 0 15px #00ffff; }
+        .btn.cancel { border-color: #ff4a4a; }
+        .btn.cancel:hover { background: #ff4a4a; box-shadow: 0 0 15px #ff4a4a; }
+        .btn.offline { border-color: #ffaa00; margin-bottom: 30px; }
+        .btn.offline:hover { background: #ffaa00; box-shadow: 0 0 15px #ffaa00; }
+
+        input[type="text"] {
+            padding: 12px; font-size: 20px; text-align: center; width: 300px;
+            background: #333; color: white; border: 2px solid #555; border-radius: 5px; margin-bottom: 15px;
+        }
+
+        #gameCanvas { background-color: #1e1e24; border: 4px solid #444; box-shadow: 0 0 40px rgba(0,0,0,0.8); }
+        .ui { display: flex; justify-content: space-around; width: 800px; margin-top: 15px; font-size: 22px; font-weight: bold; }
+        .p1-ui { color: #ff4a4a; text-shadow: 0 0 8px #000; }
+        .p2-ui { color: #4a90ff; text-shadow: 0 0 8px #000; }
+        .info { font-size: 13px; color: #ccc; margin-top: 10px; text-align: center; line-height: 1.6; }
+
+        #roomIdDisplay { font-size: 32px; color: #0f0; letter-spacing: 2px; padding: 10px; background: #222; border: 2px dashed #0f0; margin: 20px 0; user-select: text;}
+        #winnerName { font-size: 60px; font-weight: bold; margin-bottom: 30px; text-shadow: 0 0 20px #fff; }
+    </style>
+</head>
+<body>
+
+    <div id="screen-start" class="screen active">
+        <h1>STYLISH BRAWL</h1>
+        <button class="btn offline" onclick="startOffline()">オフライン2人対戦 (1つのPCで遊ぶ)</button>
+        <button class="btn" onclick="initHost()">部屋を作る (オンライン1Pとして遊ぶ)</button>
+        <button class="btn" onclick="showScreen('screen-join')">部屋に入る (オンライン2Pとして遊ぶ)</button>
+    </div>
+
+    <div id="screen-host" class="screen">
+        <h2>あなたの部屋ID (2Pに教えてください)</h2>
+        <div id="roomIdDisplay">生成中...</div>
+        <p>対戦相手の接続を待っています...</p>
+        <button class="btn cancel" onclick="location.reload()">キャンセル</button>
+    </div>
+
+    <div id="screen-join" class="screen">
+        <h2>部屋IDを入力してください</h2>
+        <input type="text" id="joinIdInput" placeholder="部屋ID">
+        <button class="btn" onclick="joinRoom()">接続する</button>
+        <button class="btn cancel" onclick="showScreen('screen-start')">戻る</button>
+    </div>
+
+    <div id="screen-game" class="screen">
+        <canvas id="gameCanvas" width="800" height="450"></canvas>
+        <div class="ui">
+            <div class="p1-ui">1P: <span id="p1-percent">0</span>% <span id="p1-stock"></span></div>
+            <div class="p2-ui">2P: <span id="p2-percent">0</span>% <span id="p2-stock"></span></div>
+        </div>
+        <div class="info" id="gameInfo"></div>
+    </div>
+
+    <div id="screen-victory" class="screen">
+        <div id="winnerName">PLAYER WINS!</div>
+        <button class="btn" onclick="location.reload()">タイトルに戻る</button>
+    </div>
+
+    <script>
+        // ==========================================
+        // 画面遷移・通信・入力管理システム
+        // ==========================================
+        function showScreen(screenId) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(screenId).classList.add('active');
+        }
+
+        let playMode = ''; // 'offline', 'host', or 'guest'
+        let peer = null;
+        let conn = null;
+        
+        // 入力状態
+        let myInput = { up: false, down: false, left: false, right: false }; // オフライン1P or オンライン自分
+        let p2LocalInput = { up: false, down: false, left: false, right: false }; // オフライン2P用
+        let peerInput = { up: false, down: false, left: false, right: false }; // オンライン相手から受け取る入力
+
+        // --- オフラインモード開始 ---
+        function startOffline() {
+            playMode = 'offline';
+            document.getElementById('gameInfo').innerHTML = "1P: WAD/S | 2P: 矢印キー<br>【技】走り+下:クソデカ拳 / (空/地)上+下:爆炎 / 空中下:剣降下 / 空中左右+下:溜め斬り / 停止+下:シールド";
+            startGame();
+        }
+
+        // --- オンライン (ホスト) 開始 ---
+        function initHost() {
+            playMode = 'host';
+            showScreen('screen-host');
+            peer = new Peer(); 
+            peer.on('open', id => { document.getElementById('roomIdDisplay').innerText = id; });
+            peer.on('connection', connection => {
+                conn = connection;
+                setupConnection();
+            });
+        }
+
+        // --- オンライン (ゲスト) 開始 ---
+        function joinRoom() {
+            let hostId = document.getElementById('joinIdInput').value.trim();
+            if (!hostId) return alert("IDを入力してください");
+            
+            playMode = 'guest';
+            peer = new Peer();
+            peer.on('open', () => {
+                conn = peer.connect(hostId);
+                setupConnection();
+            });
+        }
+
+        function setupConnection() {
+            conn.on('open', () => {
+                document.getElementById('gameInfo').innerHTML = "オンライン対戦中 (操作: WASD または 矢印キー)<br>【技】走り+下:クソデカ拳 / (空/地)上+下:爆炎 / 空中下:剣降下 / 空中左右+下:溜め斬り / 停止+下:シールド";
+                startGame();
+            });
+            conn.on('data', data => {
+                if (playMode === 'host') {
+                    peerInput = data; // ゲストの入力を受け取る
+                } else if (playMode === 'guest') {
+                    syncGameState(data); // ホストからゲーム状態を受け取る
+                }
+            });
+        }
+
+        // キー入力監視 (モードによって割り当てを変える)
+        window.addEventListener("keydown", e => updateInput(e.key, true));
+        window.addEventListener("keyup", e => updateInput(e.key, false));
+
+        function updateInput(key, isPressed) {
+            let k = key.toLowerCase();
+            if (playMode === 'offline') {
+                // 1P用 (WASD)
+                if (k === 'w') myInput.up = isPressed;
+                if (k === 's') myInput.down = isPressed;
+                if (k === 'a') myInput.left = isPressed;
+                if (k === 'd') myInput.right = isPressed;
+                // 2P用 (矢印)
+                if (k === 'arrowup') p2LocalInput.up = isPressed;
+                if (k === 'arrowdown') p2LocalInput.down = isPressed;
+                if (k === 'arrowleft') p2LocalInput.left = isPressed;
+                if (k === 'arrowright') p2LocalInput.right = isPressed;
+            } else {
+                // オンライン用 (どちらの手でも操作可能に)
+                if (k === 'w' || k === 'arrowup') myInput.up = isPressed;
+                if (k === 's' || k === 'arrowdown') myInput.down = isPressed;
+                if (k === 'a' || k === 'arrowleft') myInput.left = isPressed;
+                if (k === 'd' || k === 'arrowright') myInput.right = isPressed;
+            }
+        }
+
+
+        // ==========================================
+        // ゲームエンジン (ホスト or オフラインで実行)
+        // ==========================================
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        const stage = { x: 150, y: 350, width: 500, height: 20 };
+        const gravity = 0.45; const friction = 0.85;
+        let isGameOver = false;
+        let particles = [];
+        let p1, p2;
+
+        class Particle {
+            constructor(x, y, vx, vy, color, life, size, decay = 0.95) {
+                this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+                this.color = color; this.life = life; this.maxLife = life;
+                this.size = size; this.decay = decay;
+            }
+            update() {
+                this.x += this.vx; this.y += this.vy;
+                this.vx *= this.decay; this.vy *= this.decay;
+                this.life--;
+            }
+            draw(ctx) {
+                ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+                ctx.fillStyle = this.color;
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        function addParticles(type, x, y) {
+            if (playMode === 'guest') return; // ゲストは自分でパーティクルを作らない
+            if (type === 'sparks') {
+                for(let i=0; i<8; i++) particles.push(new Particle(x, y, (Math.random()-0.5)*15, (Math.random()-0.5)*15, "#ffffaa", 15, 3));
+            } else if (type === 'shield_break') {
+                for(let i=0; i<30; i++) particles.push(new Particle(x, y, (Math.random()-0.5)*20, (Math.random()-0.5)*20, "rgba(100, 255, 255, 0.9)", 40, 3 + Math.random()*5, 0.9));
+            } else if (type === 'explosion') {
+                for(let i=0; i<40; i++) {
+                    let c = Math.random() > 0.5 ? "#ff4500" : (Math.random() > 0.5 ? "#ffaa00" : "#333");
+                    particles.push(new Particle(x, y, (Math.random()-0.5)*18, (Math.random()-0.5)*18 - 2, c, 30 + Math.random()*20, 5 + Math.random()*15, 0.85));
+                }
+            } else if (type === 'rocket') {
+                for(let i=0; i<15; i++) {
+                    let c = Math.random() > 0.3 ? "#ffaa00" : (Math.random() > 0.5 ? "#ff2200" : "#ffffff");
+                    particles.push(new Particle(x + (Math.random()-0.5)*20, y, (Math.random()-0.5)*8, 5 + Math.random()*12, c, 20 + Math.random()*15, 4 + Math.random()*8, 0.9));
+                }
+            } else if (type === 'aura') {
+                for(let i=0; i<3; i++) {
+                    particles.push(new Particle(x + (Math.random()-0.5)*40, y + (Math.random()-0.5)*40, 0, -2 - Math.random()*3, "rgba(0, 255, 255, 0.8)", 15, 2 + Math.random()*3, 0.95));
+                }
+            }
+        }
+
+        class Player {
+            constructor(x, y, color, isLeft) {
+                this.startX = x; this.startY = y;
+                this.x = x; this.y = y; this.vx = 0; this.vy = 0;
+                this.width = 24; this.height = 36; this.color = color; 
+                this.isGrounded = false; this.percent = 0; this.stock = 3; this.isLeft = isLeft;
+                this.jumpCount = 0; this.prevJumpKey = false; this.state = 'NORMAL'; 
+                this.attackCooldown = 0; this.chargeTime = 0; this.hasHit = false; this.atkBox = null; this.animFrame = 0;
+                this.hasUsedAirAction = false; this.dashSpeed = 0; this.dashTimer = 0;
+                this.shieldHP = 100; this.shieldDir = 'FRONT'; this.stunTimer = 0; this.breakEffect = 0;
+            }
+            reset() {
+                this.x = this.startX; this.y = this.startY; this.vx = 0; this.vy = 0;
+                this.percent = 0; this.state = 'NORMAL'; this.shieldHP = 100; this.hasUsedAirAction = false;
+            }
+            update(input, opponent) {
+                if(isGameOver) return;
+                this.animFrame++;
+
+                let downKey = input.down; let upKey = input.up; let leftKey = input.left; let rightKey = input.right;
+                let wasGrounded = this.isGrounded;
+
+                if (this.attackCooldown > 0) this.attackCooldown--;
+                if (this.breakEffect > 0) this.breakEffect--;
+                if (this.state !== 'SHIELDING' && this.state !== 'STUNNED') {
+                    if (this.shieldHP < 100) this.shieldHP = Math.min(100, this.shieldHP + 0.15);
+                }
+
+                if (this.state === 'STUNNED') {
+                    this.vx *= 0.9; this.stunTimer--;
+                    if (this.stunTimer <= 0) this.state = 'NORMAL';
+                }
+                else if (this.state === 'FALLING') {
+                    if (leftKey) this.vx -= 0.5;
+                    if (rightKey) this.vx += 0.5;
+                }
+                else if (this.state === 'SHIELDING') {
+                    this.vx = 0;
+                    if (upKey) this.shieldDir = 'UP';
+                    else if (leftKey) this.shieldDir = this.isLeft ? 'FRONT' : 'BACK';
+                    else if (rightKey) this.shieldDir = this.isLeft ? 'BACK' : 'FRONT';
+                    else this.shieldDir = 'FRONT';
+
+                    this.shieldHP -= 0.25;
+                    if (this.shieldHP <= 0) { this.shieldHP = 0; this.state = 'STUNNED'; this.stunTimer = 180; } 
+                    else if (!downKey) { this.state = 'NORMAL'; }
+                }
+                else if (this.state === 'CHARGING') {
+                    this.vy = 0; this.vx = 0; this.chargeTime++;
+                    addParticles('aura', this.x + this.width/2, this.y + this.height/2);
+                    if (!downKey) {
+                        this.state = 'DASHING'; let power = Math.min(this.chargeTime, 60); 
+                        this.dashSpeed = 8 + power * 0.15; this.dashTimer = 15; this.hasHit = false; 
+                    }
+                }
+                else if (this.state === 'DASHING') {
+                    this.vy = 2; this.dashTimer--;
+                    this.vx = this.isLeft ? -this.dashSpeed : this.dashSpeed;
+                    if (this.x < opponent.x + opponent.width && this.x + this.width > opponent.x &&
+                        this.y < opponent.y + opponent.height && this.y + this.height > opponent.y) {
+                        this.state = 'SLASH_IMPACT'; this.vx = 0; this.vy = 0; this.attackCooldown = 25; this.hasHit = false;
+                        this.atkBox = { x: this.isLeft ? this.x - 70 : this.x + this.width, y: this.y - 20, w: 70, h: this.height + 60 };
+                        this.checkHit(opponent, 12 + (this.chargeTime * 0.25), 7 + (this.chargeTime * 0.2), 0.2, this.isLeft ? -1.5 : 1.5, -1);
+                    } else if (this.dashTimer <= 0) { this.state = 'FALLING'; this.chargeTime = 0; }
+                }
+                else if (this.state === 'SLASH_IMPACT') {
+                    this.vy = 0; this.vx = 0;
+                    if (this.attackCooldown <= 0) { this.state = 'FALLING'; this.chargeTime = 0; }
+                }
+                else if (this.state === 'GIANT_PUNCH') {
+                    this.vx *= 0.85; 
+                    if (this.attackCooldown === 15) {
+                        this.atkBox = { x: this.isLeft ? this.x - 90 : this.x + this.width, y: this.y - 40, w: 90, h: 100 };
+                        this.checkHit(opponent, 18, 9, 0.2, this.isLeft ? -1.5 : 1.5, -1.2);
+                        addParticles('explosion', this.atkBox.x + this.atkBox.w/2, this.atkBox.y + this.atkBox.h);
+                    } else { this.atkBox = null; }
+                    if (this.attackCooldown <= 0) this.state = 'NORMAL';
+                }
+                else if (this.state === 'ROCKETING') {
+                    addParticles('rocket', this.x + this.width/2, this.y + this.height);
+                    this.atkBox = { x: this.x - 10, y: this.y - 15, w: this.width + 20, h: 25 };
+                    this.checkHit(opponent, 14, 6, 0.1, (this.x < opponent.x ? 0.5 : -0.5), -1.8);
+                    if (this.attackCooldown <= 0) this.state = 'FALLING'; 
+                }
+                else if (this.state === 'SWORD_DROP') {
+                    this.vy = 16; this.vx = 0; 
+                    this.atkBox = { x: this.x - 5, y: this.y + this.height, w: this.width + 10, h: 20 };
+                    this.checkHit(opponent, 11, 4, 0.1, this.isLeft ? -1 : 1, -1);
+                    if (this.hasHit) {
+                        this.state = 'LANDING_LAG'; this.attackCooldown = 20; this.hasHit = false; this.vy = -2;
+                    } else if (upKey && !this.prevJumpKey) {
+                        this.state = 'SPIN_JUMP'; this.vy = -12; this.attackCooldown = 30; this.hasHit = false;
+                    }
+                }
+                else if (this.state === 'SPIN_JUMP') {
+                    this.atkBox = { x: this.x - 15, y: this.y - 10, w: this.width + 30, h: this.height + 20 };
+                    this.checkHit(opponent, 8, 5, 0.1, this.isLeft ? -1 : 1, -1.2);
+                    if (leftKey) this.vx -= 0.5;
+                    if (rightKey) this.vx += 0.5;
+                    if (this.attackCooldown <= 0) this.state = 'FALLING';
+                }
+                else if (this.state === 'LANDING_LAG') {
+                    this.vx = 0;
+                    if (this.attackCooldown === 19) { 
+                        addParticles('explosion', this.x + this.width/2, this.y + this.height);
+                        this.atkBox = { x: this.x - 60, y: this.y + this.height - 40, w: this.width + 120, h: 50 };
+                        this.checkHit(opponent, 15, 8, 0.15, this.x < opponent.x ? 2 : -2, -1.5);
+                    } else { this.atkBox = null; }
+                    if (this.attackCooldown <= 0) this.state = 'FALLING';
+                }
+                else if (this.state === 'NORMAL') {
+                    if (this.attackCooldown <= 0) {
+                        if (downKey && upKey && !this.hasUsedAirAction) {
+                            this.state = 'ROCKETING'; this.attackCooldown = 25; this.vy = -16; this.hasHit = false;
+                            if (!this.isGrounded) this.hasUsedAirAction = true;
+                        }
+                        else if (!this.isGrounded && downKey && !this.hasUsedAirAction) {
+                            if (leftKey || rightKey) {
+                                this.state = 'CHARGING'; this.chargeTime = 0; this.isLeft = leftKey; this.hasUsedAirAction = true;
+                            } else {
+                                this.state = 'SWORD_DROP'; this.hasUsedAirAction = true; this.hasHit = false;
+                            }
+                        }
+                        else if (this.isGrounded && downKey) {
+                            if (Math.abs(this.vx) > 2) {
+                                this.state = 'GIANT_PUNCH'; this.attackCooldown = 30; this.hasHit = false;
+                            } else if (this.shieldHP > 0) {
+                                this.state = 'SHIELDING';
+                            }
+                        }
+                    }
+                    if (this.state === 'NORMAL') {
+                        if (leftKey) { this.vx -= 0.8; this.isLeft = true; }
+                        if (rightKey) { this.vx += 0.8; this.isLeft = false; }
+                        if (upKey && !this.prevJumpKey && this.jumpCount < 2) {
+                            this.vy = -9.5; this.isGrounded = false; this.jumpCount++;
+                        }
+                    }
+                }
+                
+                this.prevJumpKey = upKey;
+                this.vy += gravity; this.vx *= friction;
+                this.x += this.vx; this.y += this.vy;
+
+                this.isGrounded = false;
+                if (this.x + this.width > stage.x && this.x < stage.x + stage.width && this.vy >= 0) {
+                    if (this.y + this.height >= stage.y && this.y + this.height - this.vy <= stage.y + 10) {
+                        this.y = stage.y - this.height; this.vy = 0; this.isGrounded = true;
+                        this.jumpCount = 0; this.hasUsedAirAction = false;
+                        if (this.state === 'FALLING') this.state = 'NORMAL';
+                        if (this.state === 'SWORD_DROP') { this.state = 'LANDING_LAG'; this.attackCooldown = 20; this.hasHit = false; }
+                    }
+                }
+                if (wasGrounded && !this.isGrounded && this.jumpCount === 0 && this.vy > 0) this.jumpCount = 1; 
+
+                if (this.x < -100 || this.x > canvas.width + 100 || this.y < -100 || this.y > canvas.height + 100) {
+                    this.stock--;
+                    if (this.stock <= 0 && !isGameOver) {
+                        isGameOver = true; 
+                        let winner = this.color === "#ff4a4a" ? { name: "2P (青)", col: "#4a90ff" } : { name: "1P (赤)", col: "#ff4a4a" };
+                        triggerVictory(winner.name, winner.col);
+                    } else { this.reset(); }
+                }
+            }
+
+            checkHit(opponent, damage, baseKb, scale, kbDirX, kbDirY) {
+                if (this.hasHit || !this.atkBox) return;
+                if (this.atkBox.x < opponent.x + opponent.width && this.atkBox.x + this.atkBox.w > opponent.x &&
+                    this.atkBox.y < opponent.y + opponent.height && this.atkBox.y + this.atkBox.h > opponent.y) {
+                    
+                    let isBlocked = false;
+                    if (opponent.state === 'SHIELDING') {
+                        let dx = (this.atkBox.x + this.atkBox.w/2) - (opponent.x + opponent.width/2);
+                        let dy = (this.atkBox.y + this.atkBox.h/2) - (opponent.y + opponent.height/2);
+                        if (opponent.shieldDir === 'UP' && dy < -10) isBlocked = true;
+                        if (opponent.shieldDir === 'FRONT') {
+                            if (opponent.isLeft && dx < 0) isBlocked = true;
+                            if (!opponent.isLeft && dx > 0) isBlocked = true;
+                        }
+                        if (opponent.shieldDir === 'BACK') {
+                            if (opponent.isLeft && dx > 0) isBlocked = true;
+                            if (!opponent.isLeft && dx < 0) isBlocked = true;
+                        }
+                    }
+
+                    if (isBlocked) {
+                        opponent.shieldHP -= damage * 2.5; this.hasHit = true;
+                        let sx = opponent.x + opponent.width/2; let sy = opponent.y + opponent.height/2;
+                        if (opponent.shieldDir === 'FRONT') sx += opponent.isLeft ? -16 : 16;
+                        else if (opponent.shieldDir === 'BACK') sx += opponent.isLeft ? 16 : -16;
+                        else if (opponent.shieldDir === 'UP') sy -= 16;
+                        addParticles('sparks', sx, sy); 
+                        if (opponent.shieldHP <= 0) {
+                            opponent.shieldHP = 0; opponent.state = 'FALLING'; opponent.breakEffect = 20;
+                            addParticles('shield_break', sx, sy); 
+                            opponent.vx = (opponent.x > this.x) ? 25 : -25; opponent.vy = -3;
+                        }
+                        return; 
+                    }
+
+                    opponent.percent += Math.floor(damage);
+                    let kb = (baseKb + (opponent.percent * scale)) * 0.5;
+                    opponent.vx = kbDirX * kb; opponent.vy = kbDirY * kb;
+                    this.hasHit = true;
+                    if (['CHARGING', 'DASHING', 'SWORD_DROP', 'SPIN_JUMP', 'GIANT_PUNCH'].includes(opponent.state)) opponent.state = 'FALLING';
+                }
+            }
+
+            draw() {
+                let drawColor = (this.state === 'STUNNED' || this.state === 'FALLING') ? "#888" : this.color;
+                let yOffset = (this.state === 'LANDING_LAG') ? 12 : 0;
+                ctx.fillStyle = drawColor; ctx.fillRect(this.x + 4, this.y + yOffset, 16, 12);
+                if (this.state === 'STUNNED') {
+                    ctx.fillStyle = "#ff0"; ctx.fillText("x x", this.x + 2, this.y + 10);
+                } else {
+                    ctx.fillStyle = "#fff"; ctx.fillRect(this.isLeft ? this.x + 5 : this.x + 13, this.y + yOffset + 3, 6, 4);
+                    ctx.fillStyle = "#000"; ctx.fillRect(this.isLeft ? this.x + 5 : this.x + 16, this.y + yOffset + 4, 3, 3);
+                }
+                ctx.fillStyle = drawColor; ctx.fillRect(this.x + 2, this.y + yOffset + 12, 20, yOffset ? 6 : 14);
+
+                let walkSeed = Math.sin(this.animFrame * 0.25) * 4;
+                if (!this.isGrounded) walkSeed = 4; 
+                if (Math.abs(this.vx) < 0.2 || yOffset) walkSeed = 0; 
+                ctx.fillStyle = "#333";
+                ctx.fillRect(this.x + 4 + walkSeed, this.y + yOffset + (yOffset ? 18 : 26), 6, yOffset ? 6 : 10);
+                ctx.fillRect(this.x + 14 - walkSeed, this.y + yOffset + (yOffset ? 18 : 26), 6, yOffset ? 6 : 10);
+
+                ctx.fillStyle = "#222"; ctx.fillRect(this.x - 4, this.y + this.height + 6, 32, 4);
+                ctx.fillStyle = this.shieldHP > 30 ? "#0f0" : "#f00";
+                ctx.fillRect(this.x - 4, this.y + this.height + 6, 32 * (this.shieldHP / 100), 4);
+
+                if (this.state === 'SHIELDING') {
+                    let sRatio = this.shieldHP / 100;
+                    ctx.fillStyle = `rgba(100, 200, 255, 0.4)`; ctx.strokeStyle = `rgba(100, 255, 255, 0.8)`; ctx.lineWidth = 2;
+                    let sx = this.x + this.width/2; let sy = this.y + this.height/2; let dist = 16;
+                    let shieldW = 6, shieldH = 40 * sRatio; 
+                    ctx.save(); ctx.translate(sx, sy);
+                    if (this.shieldDir === 'FRONT') { ctx.translate(this.isLeft ? -dist : dist, 0); }
+                    else if (this.shieldDir === 'BACK') { ctx.translate(this.isLeft ? dist : -dist, 0); }
+                    else if (this.shieldDir === 'UP') { ctx.translate(0, -dist); ctx.rotate(Math.PI/2); }
+                    if (this.shieldHP < 50) { ctx.beginPath(); ctx.moveTo(-3, -10); ctx.lineTo(3, 0); ctx.lineTo(-2, 10); ctx.stroke(); }
+                    ctx.beginPath(); ctx.roundRect(-shieldW/2, -shieldH/2, shieldW, shieldH, 5);
+                    ctx.fill(); ctx.stroke(); ctx.restore();
+                }
+                if (this.state === 'CHARGING') {
+                    ctx.fillStyle = "#ccc"; ctx.fillRect(this.x + this.width/2 - 2, this.y - 15, 4, 20); 
+                    ctx.strokeStyle = `rgba(0, 255, 255, ${0.4 + (this.chargeTime % 10)*0.06})`; ctx.lineWidth = 4;
+                    ctx.beginPath(); ctx.arc(this.x + this.width/2, this.y + this.height/2, 20 + (this.chargeTime*0.8), 0, Math.PI*2); ctx.stroke();
+                }
+                if (this.state === 'DASHING') {
+                    ctx.fillStyle = "rgba(0, 255, 255, 0.5)"; ctx.fillRect(this.x - (this.isLeft ? -20 : 20), this.y, this.width, this.height);
+                }
+                if (this.state === 'SLASH_IMPACT') {
+                    ctx.save(); ctx.translate(this.isLeft ? this.x - 10 : this.x + this.width + 10, this.y + 10);
+                    ctx.rotate(this.isLeft ? Math.PI / 4 : -Math.PI / 4);
+                    ctx.fillStyle = "#ffbb00"; ctx.fillRect(-5, -5, 10, 15);
+                    ctx.fillStyle = "rgba(200, 255, 255, 0.9)"; 
+                    ctx.beginPath(); ctx.moveTo(-6, 10); ctx.lineTo(6, 10); ctx.lineTo(0, 80); ctx.fill();
+                    ctx.restore();
+                }
+                if (this.state === 'GIANT_PUNCH') {
+                    let progress = 30 - this.attackCooldown;
+                    let punchY = this.y - 120 + (progress * 5); let punchX = this.isLeft ? this.x - 70 : this.x + 30;
+                    ctx.fillStyle = "rgba(120, 0, 180, 0.8)"; ctx.strokeStyle = "rgba(200, 100, 255, 0.9)"; ctx.lineWidth = 3;
+                    ctx.beginPath(); ctx.roundRect(punchX, punchY, 60, 80, 10); ctx.fill(); ctx.stroke();
+                }
+                if (this.state === 'SPIN_JUMP') {
+                    ctx.strokeStyle = "rgba(200, 200, 200, 0.8)"; ctx.lineWidth = 4;
+                    ctx.beginPath(); ctx.arc(this.x + this.width/2, this.y + this.height/2, 25, this.animFrame*0.5, this.animFrame*0.5 + Math.PI); ctx.stroke();
+                }
+                if (this.state === 'SWORD_DROP') {
+                    ctx.fillStyle = "#eee"; ctx.fillRect(this.x + this.width/2 - 3, this.y + this.height, 6, 25); 
+                }
+            }
+        }
+
+        function startGame() {
+            showScreen('screen-game');
+            p1 = new Player(250, 200, "#ff4a4a", false);
+            p2 = new Player(550, 200, "#4a90ff", true);
+            isGameOver = false; particles = [];
+            requestAnimationFrame(gameLoop);
+        }
+
+        function syncGameState(data) {
+            if (!p1 || !p2) return;
+            Object.assign(p1, data.p1); Object.assign(p2, data.p2);
+            particles = data.particles;
+            if (data.isGameOver && !isGameOver) {
+                isGameOver = true; triggerVictory(data.winnerName, data.winnerCol);
+            }
+        }
+
+        function gameLoop() {
+            if (isGameOver) return;
+
+            // --- モードごとの処理分岐 ---
+            if (playMode === 'offline') {
+                p1.update(myInput, p2);
+                p2.update(p2LocalInput, p1);
+                
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    particles[i].update();
+                    if (particles[i].life <= 0) particles.splice(i, 1);
+                }
+            } 
+            else if (playMode === 'host') {
+                p1.update(myInput, p2);
+                p2.update(peerInput, p1);
+                
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    particles[i].update();
+                    if (particles[i].life <= 0) particles.splice(i, 1);
+                }
+                // ゲストへ状態送信
+                let syncData = {
+                    p1: getSyncProps(p1), p2: getSyncProps(p2),
+                    particles: particles.map(p => ({ x: p.x, y: p.y, color: p.color, size: p.size, alpha: Math.max(0, p.life/p.maxLife) })),
+                    isGameOver: isGameOver
+                };
+                if (conn && conn.open) conn.send(syncData);
+            } 
+            else if (playMode === 'guest') {
+                // キー入力をホストへ送信
+                if (conn && conn.open) conn.send(myInput);
+            }
+
+            // --- 共通の描画処理 ---
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#555"; ctx.fillRect(stage.x, stage.y, stage.width, stage.height);
+            ctx.fillStyle = "#333"; ctx.fillRect(stage.x, stage.y + 4, stage.width, stage.height - 4);
+
+            p1.draw(); p2.draw();
+            
+            particles.forEach(p => {
+                if (playMode !== 'guest') p.draw(ctx);
+                else {
+                    ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color;
+                    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+            });
+
+            document.getElementById("p1-percent").innerText = p1.percent;
+            document.getElementById("p1-stock").innerText = "★".repeat(Math.max(0, p1.stock));
+            document.getElementById("p2-percent").innerText = p2.percent;
+            document.getElementById("p2-stock").innerText = "★".repeat(Math.max(0, p2.stock));
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function getSyncProps(p) {
+            return {
+                x: p.x, y: p.y, vx: p.vx, vy: p.vy, state: p.state, 
+                percent: p.percent, stock: p.stock, isLeft: p.isLeft, 
+                shieldHP: p.shieldHP, shieldDir: p.shieldDir, 
+                chargeTime: p.chargeTime, attackCooldown: p.attackCooldown, 
+                animFrame: p.animFrame, isGrounded: p.isGrounded
+            };
+        }
+
+        function triggerVictory(winnerName, color) {
+            isGameOver = true;
+            let winTitle = document.getElementById('winnerName');
+            winTitle.innerText = winnerName + " WINS!!";
+            winTitle.style.color = color;
+            
+            if (playMode === 'host' && conn && conn.open) {
+                conn.send({ isGameOver: true, winnerName: winnerName, winnerCol: color });
+            }
+            setTimeout(() => showScreen('screen-victory'), 1000);
+        }
+    </script>
+</body>
+</html>
