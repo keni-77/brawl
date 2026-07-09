@@ -98,6 +98,12 @@
         let p2LocalInput = { up: false, down: false, left: false, right: false }; // オフライン2P用
         let peerInput = { up: false, down: false, left: false, right: false }; // オンライン相手から受け取る入力
 
+        // 再戦・リザルト管理用の状態変数
+        let hostReady = false;
+        let guestReady = false;
+        let winnerNameGlobal = "";
+        let winnerColGlobal = "";
+
         // --- オフラインモード開始 ---
         function startOffline() {
             playMode = 'offline';
@@ -137,10 +143,23 @@
             });
             conn.on('data', data => {
                 if (playMode === 'host') {
-                    peerInput = data; // ゲストの入力を受け取る
+                    // 準備OK・退出のアクション判定
+                    if (data.isReadyAction) {
+                        guestReady = data.ready;
+                    } else if (data.isExitAction) {
+                        alert("対戦相手が退出しました。");
+                        location.reload();
+                    } else {
+                        peerInput = data; // ゲストのキー入力を受け取る
+                    }
                 } else if (playMode === 'guest') {
                     syncGameState(data); // ホストからゲーム状態を受け取る
                 }
+            });
+            // どちらかが切断・ブラウザを閉じた際の保険
+            conn.on('close', () => {
+                alert("対戦相手との接続が切断されました。");
+                location.reload();
             });
         }
 
@@ -380,13 +399,19 @@
                 }
                 if (wasGrounded && !this.isGrounded && this.jumpCount === 0 && this.vy > 0) this.jumpCount = 1; 
 
+                // 撃墜判定
                 if (this.x < -100 || this.x > canvas.width + 100 || this.y < -100 || this.y > canvas.height + 100) {
-                    this.stock--;
-                    if (this.stock <= 0 && !isGameOver) {
-                        isGameOver = true; 
-                        let winner = this.color === "#ff4a4a" ? { name: "2P (青)", col: "#4a90ff" } : { name: "1P (赤)", col: "#ff4a4a" };
-                        triggerVictory(winner.name, winner.col);
-                    } else { this.reset(); }
+                    if (playMode === 'offline') {
+                        // 【変更点】オフライン時はストックを消費せず、即座に復活して無限にテスト可能にする
+                        this.reset(); 
+                    } else {
+                        this.stock--;
+                        if (this.stock <= 0 && !isGameOver) {
+                            isGameOver = true; 
+                            let winner = this.color === "#ff4a4a" ? { name: "2P (青)", col: "#4a90ff" } : { name: "1P (赤)", col: "#ff4a4a" };
+                            triggerVictory(winner.name, winner.col);
+                        } else { this.reset(); }
+                    }
                 }
             }
 
@@ -506,6 +531,7 @@
             p1 = new Player(325, 300, "#ff4a4a", false);
             p2 = new Player(600, 300, "#4a90ff", true);
             isGameOver = false; particles = [];
+            hostReady = false; guestReady = false;
             requestAnimationFrame(gameLoop);
         }
 
@@ -513,43 +539,78 @@
             if (!p1 || !p2) return;
             Object.assign(p1, data.p1); Object.assign(p2, data.p2);
             particles = data.particles;
+            
+            // 準備状態の同期
+            hostReady = data.hostReady;
+            guestReady = data.guestReady;
+
             if (data.isGameOver && !isGameOver) {
-                isGameOver = true; triggerVictory(data.winnerName, data.winnerCol);
+                isGameOver = true; 
+                winnerNameGlobal = data.winnerName;
+                winnerColGlobal = data.winnerCol;
+                triggerVictory(data.winnerName, data.winnerCol);
+            } else if (!data.isGameOver && isGameOver) {
+                // 【変更点】ホスト側で試合が再開されたことを検知
+                isGameOver = false;
+                hostReady = false;
+                guestReady = false;
+                showScreen('screen-game');
+                let oldArea = document.getElementById('match-control-area');
+                if (oldArea) oldArea.remove();
+            }
+
+            if (isGameOver) {
+                updateVictoryScreenUI();
             }
         }
 
         function gameLoop() {
-            if (isGameOver) return;
+            // 【変更点】リザルト画面での通信・同期を維持するため、isGameOverによる一律のループ停止(return)を撤廃
 
             // --- モードごとの処理分岐 ---
             if (playMode === 'offline') {
-                p1.update(myInput, p2);
-                p2.update(p2LocalInput, p1);
-                
-                for (let i = particles.length - 1; i >= 0; i--) {
-                    particles[i].update();
-                    if (particles[i].life <= 0) particles.splice(i, 1);
+                if (!isGameOver) {
+                    p1.update(myInput, p2);
+                    p2.update(p2LocalInput, p1);
+                    
+                    for (let i = particles.length - 1; i >= 0; i--) {
+                        particles[i].update();
+                        if (particles[i].life <= 0) particles.splice(i, 1);
+                    }
                 }
             } 
             else if (playMode === 'host') {
-                p1.update(myInput, p2);
-                p2.update(peerInput, p1);
-                
-                for (let i = particles.length - 1; i >= 0; i--) {
-                    particles[i].update();
-                    if (particles[i].life <= 0) particles.splice(i, 1);
+                if (!isGameOver) {
+                    p1.update(myInput, p2);
+                    p2.update(peerInput, p1);
+                    
+                    for (let i = particles.length - 1; i >= 0; i--) {
+                        particles[i].update();
+                        if (particles[i].life <= 0) particles.splice(i, 1);
+                    }
                 }
-                // ゲストへ状態送信
+                // ゲストへ状態送信（ゲームオーバー中も同期パケットを送り続ける）
                 let syncData = {
                     p1: getSyncProps(p1), p2: getSyncProps(p2),
                     particles: particles.map(p => ({ x: p.x, y: p.y, color: p.color, size: p.size, alpha: Math.max(0, p.life/p.maxLife) })),
-                    isGameOver: isGameOver
+                    isGameOver: isGameOver,
+                    winnerName: winnerNameGlobal,
+                    winnerCol: winnerColGlobal,
+                    hostReady: hostReady,
+                    guestReady: guestReady
                 };
                 if (conn && conn.open) conn.send(syncData);
+
+                // 【変更点】双方準備OKになればもう一度試合を始める
+                if (isGameOver && hostReady && guestReady) {
+                    restartGame();
+                }
             } 
             else if (playMode === 'guest') {
-                // キー入力をホストへ送信
-                if (conn && conn.open) conn.send(myInput);
+                // キー入力をホストへ送信（試合中のみ送信）
+                if (conn && conn.open && !isGameOver) {
+                    conn.send(myInput);
+                }
             }
 
             // --- 共通の描画処理 ---
@@ -562,16 +623,19 @@
             particles.forEach(p => {
                 if (playMode !== 'guest') p.draw(ctx);
                 else {
-                    ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color;
-                    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
-                    ctx.globalAlpha = 1;
+                    if (p.alpha !== undefined) {
+                        ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color;
+                        ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+                        ctx.globalAlpha = 1;
+                    }
                 }
             });
 
+            // UI更新 (オフライン時はINF表示)
             document.getElementById("p1-percent").innerText = p1.percent;
-            document.getElementById("p1-stock").innerText = "★".repeat(Math.max(0, p1.stock));
+            document.getElementById("p1-stock").innerText = playMode === 'offline' ? "INF" : "★".repeat(Math.max(0, p1.stock));
             document.getElementById("p2-percent").innerText = p2.percent;
-            document.getElementById("p2-stock").innerText = "★".repeat(Math.max(0, p2.stock));
+            document.getElementById("p2-stock").innerText = playMode === 'offline' ? "INF" : "★".repeat(Math.max(0, p2.stock));
 
             requestAnimationFrame(gameLoop);
         }
@@ -588,14 +652,130 @@
 
         function triggerVictory(winnerName, color) {
             isGameOver = true;
+            winnerNameGlobal = winnerName;
+            winnerColGlobal = color;
+
             let winTitle = document.getElementById('winnerName');
-            winTitle.innerText = winnerName + " WINS!!";
-            winTitle.style.color = color;
-            
-            if (playMode === 'host' && conn && conn.open) {
-                conn.send({ isGameOver: true, winnerName: winnerName, winnerCol: color });
+            if (winTitle) {
+                winTitle.innerText = winnerName + " WINS!!";
+                winTitle.style.color = color;
             }
-            setTimeout(() => showScreen('screen-victory'), 1000);
+            
+            // オンラインモードの時だけUIボタンを生成
+            if (playMode === 'host' || playMode === 'guest') {
+                setupVictoryButtons();
+            }
+
+            setTimeout(() => {
+                showScreen('screen-victory');
+                if (playMode === 'host' || playMode === 'guest') {
+                    updateVictoryScreenUI();
+                }
+            }, 1000);
+        }
+
+        // ==========================================
+        // 【追加】再戦システム用のUI・ロジック関数群
+        // ==========================================
+        function setupVictoryButtons() {
+            let victoryScreen = document.getElementById('screen-victory');
+            if (!victoryScreen) return;
+
+            // 既存のボタンエリアが残っていれば一回消去
+            let oldArea = document.getElementById('match-control-area');
+            if (oldArea) oldArea.remove();
+
+            // コンテナの作成
+            let area = document.createElement('div');
+            area.id = 'match-control-area';
+            area.style.marginTop = '30px';
+            area.style.textAlign = 'center';
+
+            // 状態可視化テキスト
+            let statusTxt = document.createElement('div');
+            statusTxt.id = 'match-status-text';
+            statusTxt.style.marginBottom = '15px';
+            statusTxt.style.fontSize = '18px';
+            statusTxt.style.color = '#fff';
+            area.appendChild(statusTxt);
+
+            // 準備OKボタン
+            let readyBtn = document.createElement('button');
+            readyBtn.id = 'victory-ready-btn';
+            readyBtn.innerText = '準備OK';
+            readyBtn.style.padding = '12px 24px';
+            readyBtn.style.marginRight = '15px';
+            readyBtn.style.fontSize = '16px';
+            readyBtn.style.cursor = 'pointer';
+            readyBtn.onclick = () => {
+                if (playMode === 'host') {
+                    hostReady = !hostReady;
+                    updateVictoryScreenUI();
+                } else if (playMode === 'guest') {
+                    // ゲストは自分の希望状態（現在の反転）をホストへ送信要請
+                    if (conn && conn.open) {
+                        conn.send({ isReadyAction: true, ready: !guestReady });
+                    }
+                }
+            };
+            area.appendChild(readyBtn);
+
+            // 退出ボタン
+            let exitBtn = document.createElement('button');
+            exitBtn.id = 'victory-exit-btn';
+            exitBtn.innerText = '退出';
+            exitBtn.style.padding = '12px 24px';
+            exitBtn.style.fontSize = '16px';
+            exitBtn.style.cursor = 'pointer';
+            exitBtn.onclick = () => {
+                if (conn && conn.open && playMode === 'guest') {
+                    conn.send({ isExitAction: true });
+                }
+                location.reload(); // ページをリロードして初期画面へ
+            };
+            area.appendChild(exitBtn);
+
+            victoryScreen.appendChild(area);
+        }
+
+        function updateVictoryScreenUI() {
+            let statusTxt = document.getElementById('match-status-text');
+            let readyBtn = document.getElementById('victory-ready-btn');
+            if (!statusTxt || !readyBtn) return;
+
+            // 自分の準備状態に応じたトグルデザイン
+            let myReadyState = (playMode === 'host') ? hostReady : guestReady;
+            readyBtn.innerText = myReadyState ? '準備解除' : '準備OK';
+            readyBtn.style.backgroundColor = myReadyState ? '#4caf50' : '';
+            readyBtn.style.color = myReadyState ? '#fff' : '';
+
+            // お互いの準備状況のテキスト反映
+            let hostStatus = hostReady ? "<span style='color:#4caf50; font-weight:bold;'>OK</span>" : "待機中";
+            let guestStatus = guestReady ? "<span style='color:#4caf50; font-weight:bold;'>OK</span>" : "待機中";
+            
+            let labelHost = (playMode === 'host') ? "ホスト (あなた)" : "ホスト";
+            let labelGuest = (playMode === 'guest') ? "ゲスト (あなた)" : "ゲスト";
+
+            statusTxt.innerHTML = `${labelHost}: ${hostStatus} &nbsp;&nbsp;|&nbsp;&nbsp; ${labelGuest}: ${guestStatus}`;
+        }
+
+        function restartGame() {
+            // ゲームの数値を完全に初期化
+            p1.reset();
+            p2.reset();
+            p1.stock = 3;
+            p2.stock = 3;
+            particles = [];
+            
+            hostReady = false;
+            guestReady = false;
+            isGameOver = false;
+
+            showScreen('screen-game');
+
+            // 設置したリザルト用のボタンエリアを削除
+            let oldArea = document.getElementById('match-control-area');
+            if (oldArea) oldArea.remove();
         }
     </script>
 </body>
